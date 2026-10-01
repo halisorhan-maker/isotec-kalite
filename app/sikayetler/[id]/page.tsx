@@ -2,9 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import {
-  ArrowLeft,
   Save,
   Upload,
   Trash2,
@@ -15,10 +14,11 @@ import {
   History as HistoryIcon,
   GitBranch,
   ClipboardCheck,
+  ArrowLeft,
 } from "lucide-react";
 
 import AppShell from "@/app/components/AppShell";
-import { supabase } from "@/app/lib/supabase";
+import { createClient } from "@/app/lib/supabase/client";
 
 type Complaint = {
   id: number;
@@ -95,33 +95,37 @@ type TabKey =
 const BUCKET_PHOTOS = "complaint-photos";
 const BUCKET_DOCUMENTS = "complaint-documents";
 
-const empty8D = (
-  complaintId: number
-): EightD => ({
-  complaint_id: complaintId,
-  d1_team: "",
-  d2_problem: "",
-  d3_containment: "",
-  d4_root_cause: "",
-  d5_corrective_action: "",
-  d6_implementation: "",
-  d7_prevention: "",
-  d8_closure: "",
-  d4_method: "",
-  d4_root_cause_category: "",
-  action_responsible: "",
-  target_date: "",
-  completion_date: "",
-  status: "Taslak",
-});
+function empty8D(complaintId: number): EightD {
+  return {
+    complaint_id: complaintId,
+    d1_team: "",
+    d2_problem: "",
+    d3_containment: "",
+    d4_root_cause: "",
+    d5_corrective_action: "",
+    d6_implementation: "",
+    d7_prevention: "",
+    d8_closure: "",
+    d4_method: "",
+    d4_root_cause_category: "",
+    action_responsible: "",
+    target_date: "",
+    completion_date: "",
+    status: "Taslak",
+  };
+}
 
 export default function ComplaintDetailPage() {
   const params = useParams();
-  const router = useRouter();
 
   const complaintNo = Array.isArray(params.id)
     ? params.id[0]
-    : (params.id as string);
+    : String(params.id || "");
+
+  /*
+   * LİSTE SAYFASIYLA AYNI SUPABASE CLIENT
+   */
+  const supabase = createClient();
 
   const [complaint, setComplaint] =
     useState<Complaint | null>(null);
@@ -168,8 +172,11 @@ export default function ComplaintDetailPage() {
   const [roleLoading, setRoleLoading] =
     useState(true);
 
-  const photoInputRef = useRef<HTMLInputElement>(null);
-  const documentInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef =
+    useRef<HTMLInputElement>(null);
+
+  const documentInputRef =
+    useRef<HTMLInputElement>(null);
 
   const canEditComplaint =
     roleLoading ||
@@ -177,52 +184,11 @@ export default function ComplaintDetailPage() {
     userRole === "Kalite Sorumlusu" ||
     userRole === "Kalite Kontrol";
 
-  // 8D alanları rol yüklenirken veya rol bilgisi alınamadığında
-  // kilitlenmesin. Yetki kontrolü diğer bölümlerde korunur.
   const canEdit8D = true;
 
   useEffect(() => {
     loadUserRole();
   }, []);
-
-  async function loadUserRole() {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        setUserRole(null);
-        return;
-      }
-
-      const { data, error: roleError } =
-        await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", user.id)
-          .single();
-
-      if (roleError) {
-        console.error(
-          "Kullanıcı rolü alınamadı:",
-          roleError
-        );
-        setUserRole(null);
-        return;
-      }
-
-      setUserRole(data?.role || null);
-    } catch (err) {
-      console.error(
-        "Kullanıcı rolü yüklenirken hata oluştu:",
-        err
-      );
-      setUserRole(null);
-    } finally {
-      setRoleLoading(false);
-    }
-  }
 
   useEffect(() => {
     if (!complaintNo) return;
@@ -230,30 +196,158 @@ export default function ComplaintDetailPage() {
     loadAll();
   }, [complaintNo]);
 
+  async function loadUserRole() {
+    try {
+      setRoleLoading(true);
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) {
+        console.error(
+          "Kullanıcı bilgisi alınamadı:",
+          userError
+        );
+
+        setUserRole(null);
+        return;
+      }
+
+      if (!user) {
+        setUserRole(null);
+        return;
+      }
+
+      const {
+        data: roleRows,
+        error: roleError,
+      } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .limit(1);
+
+      if (roleError) {
+        console.error(
+          "Kullanıcı rolü alınamadı:",
+          roleError
+        );
+
+        setUserRole(null);
+        return;
+      }
+
+      setUserRole(
+        roleRows?.[0]?.role || null
+      );
+    } catch (err) {
+      console.error(
+        "Kullanıcı rolü yüklenirken hata oluştu:",
+        err
+      );
+
+      setUserRole(null);
+    } finally {
+      setRoleLoading(false);
+    }
+  }
+
   async function loadAll() {
     setLoading(true);
     setError("");
 
     try {
+      let complaintData: Complaint | null =
+        null;
+
+      /*
+       * 1 — Önce complaint_no ile ara
+       *
+       * Liste sayfası URL'yi şu şekilde oluşturuyor:
+       *
+       * /sikayetler/SK-26-7311
+       *
+       * Dolayısıyla burada da aynı değeri
+       * complaints.complaint_no alanında arıyoruz.
+       */
       const {
-        data: complaintData,
-        error: complaintError,
+        data: complaintByNo,
+        error: complaintNoError,
       } = await supabase
         .from("complaints")
         .select("*")
         .eq("complaint_no", complaintNo)
-        .single();
+        .order("created_at", {
+          ascending: false,
+        })
+        .limit(1);
 
-      if (complaintError) {
-        throw complaintError;
+      if (complaintNoError) {
+        throw complaintNoError;
       }
 
+      if (
+        complaintByNo &&
+        complaintByNo.length > 0
+      ) {
+        complaintData =
+          complaintByNo[0] as Complaint;
+      }
+
+      /*
+       * 2 — Bulamazsa numeric ID olarak dene
+       *
+       * Bu ikinci kontrol ileride URL yapısını
+       * ID'ye çevirirsek de detay sayfasının
+       * çalışmaya devam etmesini sağlar.
+       */
       if (!complaintData) {
-        throw new Error("Şikayet bulunamadı.");
+        const numericId = Number(complaintNo);
+
+        if (
+          complaintNo.trim() !== "" &&
+          Number.isInteger(numericId) &&
+          numericId > 0
+        ) {
+          const {
+            data: complaintById,
+            error: complaintIdError,
+          } = await supabase
+            .from("complaints")
+            .select("*")
+            .eq("id", numericId)
+            .limit(1);
+
+          if (complaintIdError) {
+            throw complaintIdError;
+          }
+
+          if (
+            complaintById &&
+            complaintById.length > 0
+          ) {
+            complaintData =
+              complaintById[0] as Complaint;
+          }
+        }
+      }
+
+      /*
+       * Kayıt hâlâ bulunamadıysa detaylı hata göster.
+       */
+      if (!complaintData) {
+        throw new Error(
+          `Şikayet bulunamadı. Aranan değer: ${complaintNo}`
+        );
       }
 
       setComplaint(complaintData);
 
+      /*
+       * Şikayetin alt kayıtlarını yükle
+       */
       const [
         eightDResult,
         photosResult,
@@ -263,13 +357,22 @@ export default function ComplaintDetailPage() {
         supabase
           .from("complaint_8d")
           .select("*")
-          .eq("complaint_id", complaintData.id)
-          .maybeSingle(),
+          .eq(
+            "complaint_id",
+            complaintData.id
+          )
+          .order("created_at", {
+            ascending: false,
+          })
+          .limit(1),
 
         supabase
           .from("complaint_photos")
           .select("*")
-          .eq("complaint_id", complaintData.id)
+          .eq(
+            "complaint_id",
+            complaintData.id
+          )
           .order("uploaded_at", {
             ascending: false,
           }),
@@ -277,7 +380,10 @@ export default function ComplaintDetailPage() {
         supabase
           .from("complaint_documents")
           .select("*")
-          .eq("complaint_id", complaintData.id)
+          .eq(
+            "complaint_id",
+            complaintData.id
+          )
           .order("uploaded_at", {
             ascending: false,
           }),
@@ -285,7 +391,10 @@ export default function ComplaintDetailPage() {
         supabase
           .from("complaint_history")
           .select("*")
-          .eq("complaint_id", complaintData.id)
+          .eq(
+            "complaint_id",
+            complaintData.id
+          )
           .order("created_at", {
             ascending: false,
           }),
@@ -307,30 +416,33 @@ export default function ComplaintDetailPage() {
         throw historyResult.error;
       }
 
+      const firstEightD =
+        eightDResult.data?.[0];
+
       setEightD(
-        eightDResult.data ||
-          empty8D(complaintData.id)
+        firstEightD
+          ? (firstEightD as EightD)
+          : empty8D(complaintData.id)
       );
 
       setPhotos(
-        (photosResult.data ||
-          []) as Photo[]
+        (photosResult.data || []) as Photo[]
       );
 
       setDocuments(
-        (documentsResult.data ||
-          []) as Document[]
+        (documentsResult.data || []) as Document[]
       );
 
       setHistory(
-        (historyResult.data ||
-          []) as History[]
+        (historyResult.data || []) as History[]
       );
     } catch (err: any) {
       console.error(
         "Şikayet detay yükleme hatası:",
         err
       );
+
+      setComplaint(null);
 
       setError(
         err?.message ||
@@ -349,19 +461,18 @@ export default function ComplaintDetailPage() {
   ) {
     if (!complaint) return;
 
-    const { error: historyError } =
-      await supabase
-        .from("complaint_history")
-        .insert({
-          complaint_id: complaint.id,
-          action_type: actionType,
-          description,
-          old_value:
-            oldValue || null,
-          new_value:
-            newValue || null,
-          user_name: "Kalite",
-        });
+    const {
+      error: historyError,
+    } = await supabase
+      .from("complaint_history")
+      .insert({
+        complaint_id: complaint.id,
+        action_type: actionType,
+        description,
+        old_value: oldValue || null,
+        new_value: newValue || null,
+        user_name: "Kalite",
+      });
 
     if (historyError) {
       console.error(
@@ -374,7 +485,12 @@ export default function ComplaintDetailPage() {
   async function updateStatus(
     status: string
   ) {
-    if (!complaint || !canEditComplaint) return;
+    if (
+      !complaint ||
+      !canEditComplaint
+    ) {
+      return;
+    }
 
     const oldStatus =
       complaint.status;
@@ -440,7 +556,10 @@ export default function ComplaintDetailPage() {
     } = await supabase
       .from("complaint_history")
       .select("*")
-      .eq("complaint_id", complaint.id)
+      .eq(
+        "complaint_id",
+        complaint.id
+      )
       .order("created_at", {
         ascending: false,
       });
@@ -453,7 +572,11 @@ export default function ComplaintDetailPage() {
   }
 
   async function save8D() {
-    if (!complaint || !eightD || !canEdit8D) {
+    if (
+      !complaint ||
+      !eightD ||
+      !canEdit8D
+    ) {
       return;
     }
 
@@ -464,7 +587,8 @@ export default function ComplaintDetailPage() {
     try {
       const payload = {
         complaint_id: complaint.id,
-        d1_team: eightD.d1_team || null,
+        d1_team:
+          eightD.d1_team || null,
         d2_problem:
           eightD.d2_problem || null,
         d3_containment:
@@ -499,31 +623,39 @@ export default function ComplaintDetailPage() {
           new Date().toISOString(),
       };
 
-      let result;
-
       if (eightD.id) {
-        result = await supabase
+        const {
+          error: updateError,
+        } = await supabase
           .from("complaint_8d")
           .update(payload)
-          .eq("id", eightD.id)
-          .select()
-          .single();
+          .eq("id", eightD.id);
+
+        if (updateError) {
+          throw updateError;
+        }
       } else {
-        result = await supabase
+        const {
+          data: insertedRows,
+          error: insertError,
+        } = await supabase
           .from("complaint_8d")
           .insert(payload)
-          .select()
-          .single();
-      }
+          .select("*")
+          .limit(1);
 
-      if (result.error) {
-        throw result.error;
-      }
+        if (insertError) {
+          throw insertError;
+        }
 
-      if (result.data) {
-        setEightD(
-          result.data as EightD
-        );
+        if (
+          insertedRows &&
+          insertedRows.length > 0
+        ) {
+          setEightD(
+            insertedRows[0] as EightD
+          );
+        }
       }
 
       await addHistory(
@@ -554,18 +686,14 @@ export default function ComplaintDetailPage() {
   async function uploadPhotos(
     files: FileList | null
   ) {
-    if (!complaint || !files) {
-      return;
-    }
+    if (!complaint || !files) return;
 
     setUploadingPhotos(true);
     setMessage("");
     setError("");
 
     try {
-      for (const file of Array.from(
-        files
-      )) {
+      for (const file of Array.from(files)) {
         const safeName =
           file.name.replace(
             /[^a-zA-Z0-9._-]/g,
@@ -581,11 +709,14 @@ export default function ComplaintDetailPage() {
           .upload(path, file, {
             cacheControl: "3600",
             upsert: false,
-            contentType: file.type || undefined,
+            contentType:
+              file.type || undefined,
           });
 
         if (uploadError) {
-          throw new Error(`Dosya Storage'a yüklenemedi (${BUCKET_PHOTOS}): ${uploadError.message}`);
+          throw new Error(
+            `Dosya Storage'a yüklenemedi (${BUCKET_PHOTOS}): ${uploadError.message}`
+          );
         }
 
         const {
@@ -608,8 +739,13 @@ export default function ComplaintDetailPage() {
           });
 
         if (insertError) {
-          await supabase.storage.from(BUCKET_PHOTOS).remove([path]);
-          throw new Error(`Fotoğraf kaydı veritabanına yazılamadı: ${insertError.message}`);
+          await supabase.storage
+            .from(BUCKET_PHOTOS)
+            .remove([path]);
+
+          throw new Error(
+            `Fotoğraf kaydı veritabanına yazılamadı: ${insertError.message}`
+          );
         }
       }
 
@@ -641,18 +777,14 @@ export default function ComplaintDetailPage() {
   async function uploadDocuments(
     files: FileList | null
   ) {
-    if (!complaint || !files) {
-      return;
-    }
+    if (!complaint || !files) return;
 
     setUploadingDocuments(true);
     setMessage("");
     setError("");
 
     try {
-      for (const file of Array.from(
-        files
-      )) {
+      for (const file of Array.from(files)) {
         const safeName =
           file.name.replace(
             /[^a-zA-Z0-9._-]/g,
@@ -668,11 +800,14 @@ export default function ComplaintDetailPage() {
           .upload(path, file, {
             cacheControl: "3600",
             upsert: false,
-            contentType: file.type || undefined,
+            contentType:
+              file.type || undefined,
           });
 
         if (uploadError) {
-          throw new Error(`Dosya Storage'a yüklenemedi (${BUCKET_DOCUMENTS}): ${uploadError.message}`);
+          throw new Error(
+            `Dosya Storage'a yüklenemedi (${BUCKET_DOCUMENTS}): ${uploadError.message}`
+          );
         }
 
         const {
@@ -698,8 +833,13 @@ export default function ComplaintDetailPage() {
           });
 
         if (insertError) {
-          await supabase.storage.from(BUCKET_DOCUMENTS).remove([path]);
-          throw new Error(`Doküman kaydı veritabanına yazılamadı: ${insertError.message}`);
+          await supabase.storage
+            .from(BUCKET_DOCUMENTS)
+            .remove([path]);
+
+          throw new Error(
+            `Doküman kaydı veritabanına yazılamadı: ${insertError.message}`
+          );
         }
       }
 
@@ -731,7 +871,12 @@ export default function ComplaintDetailPage() {
   async function deletePhoto(
     photo: Photo
   ) {
-    if (!complaint || !canEditComplaint) return;
+    if (
+      !complaint ||
+      !canEditComplaint
+    ) {
+      return;
+    }
 
     const confirmed =
       window.confirm(
@@ -783,7 +928,12 @@ export default function ComplaintDetailPage() {
   async function deleteDocument(
     document: Document
   ) {
-    if (!complaint || !canEditComplaint) return;
+    if (
+      !complaint ||
+      !canEditComplaint
+    ) {
+      return;
+    }
 
     const confirmed =
       window.confirm(
@@ -797,9 +947,7 @@ export default function ComplaintDetailPage() {
         error: storageError,
       } = await supabase.storage
         .from(BUCKET_DOCUMENTS)
-        .remove([
-          document.file_path,
-        ]);
+        .remove([document.file_path]);
 
       if (storageError) {
         throw storageError;
@@ -893,7 +1041,6 @@ export default function ComplaintDetailPage() {
       <div className="box-border w-full min-w-0 max-w-full overflow-x-hidden px-8 py-6">
         <div className="mx-auto w-full max-w-[1500px] space-y-6">
 
-          {/* HEADER */}
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div>
               <div className="mb-2 flex items-center gap-2 text-sm text-slate-500">
@@ -907,9 +1054,7 @@ export default function ComplaintDetailPage() {
 
                 <span>/</span>
 
-                <span>
-                  Şikayet Detayı
-                </span>
+                <span>Şikayet Detayı</span>
               </div>
 
               <h1 className="text-2xl font-semibold text-slate-900">
@@ -939,17 +1084,25 @@ export default function ComplaintDetailPage() {
                 <option value="Açık">
                   Açık
                 </option>
+
                 <option value="İnceleniyor">
                   İnceleniyor
                 </option>
+
                 <option value="Beklemede">
                   Beklemede
                 </option>
+
                 <option value="Çözüldü">
                   Çözüldü
                 </option>
+
                 <option value="Kapalı">
                   Kapalı
+                </option>
+
+                <option value="Araştırılıyor">
+                  Araştırılıyor
                 </option>
               </select>
 
@@ -974,7 +1127,6 @@ export default function ComplaintDetailPage() {
             </div>
           </div>
 
-          {/* MESAJ */}
           {message && (
             <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
               <CheckCircle2 size={17} />
@@ -982,7 +1134,6 @@ export default function ComplaintDetailPage() {
             </div>
           )}
 
-          {/* HATA */}
           {error && (
             <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <AlertTriangle size={17} />
@@ -990,7 +1141,6 @@ export default function ComplaintDetailPage() {
             </div>
           )}
 
-          {/* ÖZET */}
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <InfoCard
               label="Müşteri"
@@ -1018,7 +1168,6 @@ export default function ComplaintDetailPage() {
             />
           </div>
 
-          {/* TABS */}
           <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="flex min-w-max border-b border-slate-100">
               <Tab
@@ -1040,9 +1189,7 @@ export default function ComplaintDetailPage() {
                 }
                 label="8D Analizi"
                 icon={
-                  <ClipboardCheck
-                    size={16}
-                  />
+                  <ClipboardCheck size={16} />
                 }
               />
 
@@ -1055,27 +1202,20 @@ export default function ComplaintDetailPage() {
                 }
                 label="Fotoğraflar"
                 icon={
-                  <ImageIcon
-                    size={16}
-                  />
+                  <ImageIcon size={16} />
                 }
               />
 
               <Tab
                 active={
-                  activeTab ===
-                  "documents"
+                  activeTab === "documents"
                 }
                 onClick={() =>
-                  setActiveTab(
-                    "documents"
-                  )
+                  setActiveTab("documents")
                 }
                 label="Dokümanlar"
                 icon={
-                  <FileText
-                    size={16}
-                  />
+                  <FileText size={16} />
                 }
               />
 
@@ -1088,17 +1228,13 @@ export default function ComplaintDetailPage() {
                 }
                 label="İşlem Geçmişi"
                 icon={
-                  <HistoryIcon
-                    size={16}
-                  />
+                  <HistoryIcon size={16} />
                 }
               />
             </div>
 
-            {/* GENEL */}
             {activeTab === "general" && (
               <div className="space-y-6 p-6">
-
                 <div>
                   <h2 className="text-lg font-semibold text-slate-900">
                     Şikayet Bilgileri
@@ -1213,11 +1349,9 @@ export default function ComplaintDetailPage() {
               </div>
             )}
 
-            {/* 8D */}
             {activeTab === "8d" &&
               eightD && (
                 <div className="space-y-6 p-6">
-
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                     <div>
                       <h2 className="text-lg font-semibold text-slate-900">
@@ -1245,9 +1379,7 @@ export default function ComplaintDetailPage() {
                         }
                         className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
                       >
-                        <Save
-                          size={17}
-                        />
+                        <Save size={17} />
 
                         {saving8D
                           ? "Kaydediliyor..."
@@ -1263,15 +1395,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d1_team
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d1_team",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D2 — Problem Tanımı"
@@ -1279,15 +1414,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d2_problem
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d2_problem",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D3 — Geçici Önlem"
@@ -1295,15 +1433,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d3_containment
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d3_containment",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D4 — Kök Neden"
@@ -1311,15 +1452,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d4_root_cause
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d4_root_cause",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D5 — Düzeltici Faaliyet"
@@ -1327,15 +1471,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d5_corrective_action
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d5_corrective_action",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D6 — Uygulama"
@@ -1343,15 +1490,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d6_implementation
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d6_implementation",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D7 — Tekrarı Önleme"
@@ -1359,15 +1509,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d7_prevention
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d7_prevention",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
 
                     <EightDBox
                       title="D8 — Kapanış"
@@ -1375,15 +1528,18 @@ export default function ComplaintDetailPage() {
                       value={
                         eightD.d8_closure
                       }
-                      onChange={(value) =>
+                      onChange={(
+                        value
+                      ) =>
                         updateEightD(
                           "d8_closure",
                           value
                         )
                       }
-                    
-                      disabled={!canEdit8D}
-/>
+                      disabled={
+                        !canEdit8D
+                      }
+                    />
                   </div>
 
                   <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
@@ -1392,74 +1548,83 @@ export default function ComplaintDetailPage() {
                     </h3>
 
                     <div className="mt-4 grid gap-5 md:grid-cols-3">
-
                       <Field
                         label="Analiz Yöntemi"
                         value={
                           eightD.d4_method
                         }
-                        onChange={(value) =>
+                        onChange={(
+                          value
+                        ) =>
                           updateEightD(
                             "d4_method",
                             value
                           )
                         }
                         placeholder="5 Neden, Ishikawa vb."
-                      
-                        disabled={!canEdit8D}
-/>
+                        disabled={
+                          !canEdit8D
+                        }
+                      />
 
                       <Field
                         label="Kök Neden Kategorisi"
                         value={
                           eightD.d4_root_cause_category
                         }
-                        onChange={(value) =>
+                        onChange={(
+                          value
+                        ) =>
                           updateEightD(
                             "d4_root_cause_category",
                             value
                           )
                         }
                         placeholder="İnsan, Makine, Metot..."
-                      
-                        disabled={!canEdit8D}
-/>
+                        disabled={
+                          !canEdit8D
+                        }
+                      />
 
                       <Field
                         label="Aksiyon Sorumlusu"
                         value={
                           eightD.action_responsible
                         }
-                        onChange={(value) =>
+                        onChange={(
+                          value
+                        ) =>
                           updateEightD(
                             "action_responsible",
                             value
                           )
                         }
                         placeholder="Sorumlu kişi / bölüm"
-                      
-                        disabled={!canEdit8D}
-/>
-
+                        disabled={
+                          !canEdit8D
+                        }
+                      />
                     </div>
 
                     <div className="mt-5 grid gap-5 md:grid-cols-3">
-
                       <Field
                         label="Hedef Tarih"
                         type="date"
                         value={
                           eightD.target_date
                         }
-                        onChange={(value) =>
+                        onChange={(
+                          value
+                        ) =>
                           updateEightD(
                             "target_date",
                             value
                           )
                         }
-                      
-                        disabled={!canEdit8D}
-/>
+                        disabled={
+                          !canEdit8D
+                        }
+                      />
 
                       <Field
                         label="Tamamlanma Tarihi"
@@ -1467,15 +1632,18 @@ export default function ComplaintDetailPage() {
                         value={
                           eightD.completion_date
                         }
-                        onChange={(value) =>
+                        onChange={(
+                          value
+                        ) =>
                           updateEightD(
                             "completion_date",
                             value
                           )
                         }
-                      
-                        disabled={!canEdit8D}
-/>
+                        disabled={
+                          !canEdit8D
+                        }
+                      />
 
                       <div>
                         <label className="mb-2 block text-sm font-medium text-slate-700">
@@ -1486,8 +1654,12 @@ export default function ComplaintDetailPage() {
                           value={
                             eightD.status
                           }
-                          disabled={!canEdit8D}
-                          onChange={(e) =>
+                          disabled={
+                            !canEdit8D
+                          }
+                          onChange={(
+                            e
+                          ) =>
                             updateEightD(
                               "status",
                               e.target.value
@@ -1498,12 +1670,15 @@ export default function ComplaintDetailPage() {
                           <option value="Taslak">
                             Taslak
                           </option>
+
                           <option value="Devam Ediyor">
                             Devam Ediyor
                           </option>
+
                           <option value="Tamamlandı">
                             Tamamlandı
                           </option>
+
                           <option value="Onaylandı">
                             Onaylandı
                           </option>
@@ -1516,7 +1691,10 @@ export default function ComplaintDetailPage() {
                     <button
                       type="button"
                       onClick={save8D}
-                      disabled={saving8D || !canEdit8D}
+                      disabled={
+                        saving8D ||
+                        !canEdit8D
+                      }
                       className="flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
                     >
                       <Save size={17} />
@@ -1529,10 +1707,8 @@ export default function ComplaintDetailPage() {
                 </div>
               )}
 
-            {/* FOTOĞRAFLAR */}
             {activeTab === "photos" && (
               <div className="space-y-6 p-6">
-
                 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-slate-900">
@@ -1547,12 +1723,19 @@ export default function ComplaintDetailPage() {
                   <div>
                     <button
                       type="button"
-                      onClick={() => photoInputRef.current?.click()}
-                      disabled={uploadingPhotos}
+                      onClick={() =>
+                        photoInputRef.current?.click()
+                      }
+                      disabled={
+                        uploadingPhotos
+                      }
                       className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Upload size={17} />
-                      {uploadingPhotos ? "Yükleniyor..." : "Fotoğraf Yükle"}
+
+                      {uploadingPhotos
+                        ? "Yükleniyor..."
+                        : "Fotoğraf Yükle"}
                     </button>
 
                     <input
@@ -1561,10 +1744,16 @@ export default function ComplaintDetailPage() {
                       accept="image/*"
                       multiple
                       className="hidden"
-                      disabled={uploadingPhotos}
+                      disabled={
+                        uploadingPhotos
+                      }
                       onChange={(e) => {
-                        uploadPhotos(e.target.files);
-                        e.currentTarget.value = "";
+                        uploadPhotos(
+                          e.target.files
+                        );
+
+                        e.currentTarget.value =
+                          "";
                       }}
                     />
                   </div>
@@ -1573,9 +1762,7 @@ export default function ComplaintDetailPage() {
                 {photos.length === 0 ? (
                   <EmptyState
                     icon={
-                      <ImageIcon
-                        size={24}
-                      />
+                      <ImageIcon size={24} />
                     }
                     text="Henüz fotoğraf eklenmemiş."
                   />
@@ -1584,9 +1771,7 @@ export default function ComplaintDetailPage() {
                     {photos.map(
                       (photo) => (
                         <div
-                          key={
-                            photo.id
-                          }
+                          key={photo.id}
                           className="overflow-hidden rounded-2xl border border-slate-200 bg-white"
                         >
                           <a
@@ -1629,9 +1814,7 @@ export default function ComplaintDetailPage() {
                                 className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"
                               >
                                 <Trash2
-                                  size={
-                                    16
-                                  }
+                                  size={16}
                                 />
                               </button>
                             </div>
@@ -1644,11 +1827,8 @@ export default function ComplaintDetailPage() {
               </div>
             )}
 
-            {/* DOKÜMANLAR */}
-            {activeTab ===
-              "documents" && (
+            {activeTab === "documents" && (
               <div className="space-y-6 p-6">
-
                 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-slate-900">
@@ -1663,12 +1843,19 @@ export default function ComplaintDetailPage() {
                   <div>
                     <button
                       type="button"
-                      onClick={() => documentInputRef.current?.click()}
-                      disabled={uploadingDocuments}
+                      onClick={() =>
+                        documentInputRef.current?.click()
+                      }
+                      disabled={
+                        uploadingDocuments
+                      }
                       className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Upload size={17} />
-                      {uploadingDocuments ? "Yükleniyor..." : "Doküman Yükle"}
+
+                      {uploadingDocuments
+                        ? "Yükleniyor..."
+                        : "Doküman Yükle"}
                     </button>
 
                     <input
@@ -1676,22 +1863,25 @@ export default function ComplaintDetailPage() {
                       type="file"
                       multiple
                       className="hidden"
-                      disabled={uploadingDocuments}
+                      disabled={
+                        uploadingDocuments
+                      }
                       onChange={(e) => {
-                        uploadDocuments(e.target.files);
-                        e.currentTarget.value = "";
+                        uploadDocuments(
+                          e.target.files
+                        );
+
+                        e.currentTarget.value =
+                          "";
                       }}
                     />
                   </div>
                 </div>
 
-                {documents.length ===
-                0 ? (
+                {documents.length === 0 ? (
                   <EmptyState
                     icon={
-                      <FileText
-                        size={24}
-                      />
+                      <FileText size={24} />
                     }
                     text="Henüz doküman eklenmemiş."
                   />
@@ -1703,12 +1893,15 @@ export default function ComplaintDetailPage() {
                           <th className="px-5 py-4 text-left font-semibold text-slate-700">
                             Doküman
                           </th>
+
                           <th className="px-5 py-4 text-left font-semibold text-slate-700">
                             Tip
                           </th>
+
                           <th className="px-5 py-4 text-left font-semibold text-slate-700">
                             Tarih
                           </th>
+
                           <th className="px-5 py-4 text-right font-semibold text-slate-700">
                             İşlem
                           </th>
@@ -1734,9 +1927,7 @@ export default function ComplaintDetailPage() {
                                   className="flex items-center gap-3 font-medium text-blue-600 hover:text-blue-800"
                                 >
                                   <FileText
-                                    size={
-                                      18
-                                    }
+                                    size={18}
                                   />
 
                                   {
@@ -1764,16 +1955,14 @@ export default function ComplaintDetailPage() {
                                       document
                                     )
                                   }
-                                    disabled={
-                                      roleLoading ||
-                                      !canEditComplaint
-                                    }
-                                    className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"
+                                  disabled={
+                                    roleLoading ||
+                                    !canEditComplaint
+                                  }
+                                  className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"
                                 >
                                   <Trash2
-                                    size={
-                                      16
-                                    }
+                                    size={16}
                                   />
                                 </button>
                               </td>
@@ -1787,11 +1976,8 @@ export default function ComplaintDetailPage() {
               </div>
             )}
 
-            {/* GEÇMİŞ */}
-            {activeTab ===
-              "history" && (
+            {activeTab === "history" && (
               <div className="space-y-6 p-6">
-
                 <div>
                   <h2 className="text-lg font-semibold text-slate-900">
                     İşlem Geçmişi
@@ -1802,13 +1988,10 @@ export default function ComplaintDetailPage() {
                   </p>
                 </div>
 
-                {history.length ===
-                0 ? (
+                {history.length === 0 ? (
                   <EmptyState
                     icon={
-                      <HistoryIcon
-                        size={24}
-                      />
+                      <HistoryIcon size={24} />
                     }
                     text="Henüz işlem geçmişi bulunmuyor."
                   />
@@ -1817,16 +2000,12 @@ export default function ComplaintDetailPage() {
                     {history.map(
                       (item) => (
                         <div
-                          key={
-                            item.id
-                          }
+                          key={item.id}
                           className="flex gap-4 rounded-xl border border-slate-200 bg-white p-4"
                         >
                           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-600">
                             <HistoryIcon
-                              size={
-                                18
-                              }
+                              size={18}
                             />
                           </div>
 
@@ -1886,16 +2065,11 @@ export default function ComplaintDetailPage() {
               </div>
             )}
           </div>
-
         </div>
       </div>
     </AppShell>
   );
 }
-
-/* ---------------------------------- */
-/* YARDIMCI COMPONENTLER */
-/* ---------------------------------- */
 
 function InfoCard({
   label,
@@ -2056,9 +2230,7 @@ function EmptyState({
   );
 }
 
-function formatDate(
-  value: string
-) {
+function formatDate(value: string) {
   if (!value) return "-";
 
   return new Date(
@@ -2066,9 +2238,7 @@ function formatDate(
   ).toLocaleDateString("tr-TR");
 }
 
-function formatDateTime(
-  value: string
-) {
+function formatDateTime(value: string) {
   if (!value) return "-";
 
   return new Date(value).toLocaleString(
